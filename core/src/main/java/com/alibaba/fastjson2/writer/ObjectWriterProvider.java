@@ -669,19 +669,23 @@ public class ObjectWriterProvider
             if (scope.isLockFreeFallback()) {
                 ObjectWriter objectWriter = targetCache.get(objectType);
                 if (objectWriter != null) {
-                    return objectWriter;
+                    return scope.complete(objectWriter);
                 }
                 objectWriter = resolveObjectWriter(objectType, objectClass, fieldBased);
-                return CodecCreationCoordinator.publish(targetCache, objectType, objectWriter);
+                return scope.complete(
+                        CodecCreationCoordinator.publish(targetCache, objectType, objectWriter)
+                );
             }
             ObjectWriter objectWriter = targetCache.get(objectType);
             if (objectWriter != null) {
-                return objectWriter;
+                return scope.complete(objectWriter);
             }
             scope.throwIfFailed();
             try {
                 objectWriter = resolveObjectWriter(objectType, objectClass, fieldBased);
-                return CodecCreationCoordinator.publish(targetCache, objectType, objectWriter);
+                return scope.complete(
+                        CodecCreationCoordinator.publish(targetCache, objectType, objectWriter)
+                );
             } catch (RuntimeException | Error error) {
                 scope.fail(error);
                 throw error;

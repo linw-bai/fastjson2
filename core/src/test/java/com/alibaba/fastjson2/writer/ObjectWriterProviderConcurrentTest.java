@@ -59,10 +59,12 @@ public class ObjectWriterProviderConcurrentTest {
     @Test
     public void testSpecializedObjectWriterIsPublished() throws InterruptedException {
         ObjectWriterProvider provider = new ObjectWriterProvider();
+        provider.modules.clear();
 
         Set<ObjectWriter> writers = getWriters(provider, ExtendedMap.class, false, 32);
 
         assertEquals(1, writers.size());
+        assertTrue(writers.iterator().next() instanceof ObjectWriterImplMap);
         assertSame(writers.iterator().next(), provider.cache.get(ExtendedMap.class));
         assertNoCreateLocks(provider);
     }
@@ -72,7 +74,7 @@ public class ObjectWriterProviderConcurrentTest {
         AtomicInteger createCount = new AtomicInteger();
         CountDownLatch firstStarted = new CountDownLatch(1);
         CountDownLatch failFirst = new CountDownLatch(1);
-        IllegalStateException expectedError = new IllegalStateException("first creation failed");
+        AssertionError expectedError = new AssertionError("first creation failed");
         ObjectWriterCreator creator = new ObjectWriterCreator() {
             @Override
             public ObjectWriter createObjectWriter(
@@ -151,6 +153,8 @@ public class ObjectWriterProviderConcurrentTest {
         AtomicReference<Throwable> firstError = new AtomicReference<>();
         startDaemonThread(() -> getObjectWriter(provider, FailureBean.class, firstError, firstDone));
         assertTrue(firstStarted.await(5, TimeUnit.SECONDS));
+        CodecCreationCoordinator.LockEntry retainedLock = provider.createLocks.get(FailureBean.class);
+        assertNotNull(retainedLock);
 
         CountDownLatch fallbackEntered = new CountDownLatch(1);
         CountDownLatch releaseFallback = new CountDownLatch(1);
@@ -167,6 +171,7 @@ public class ObjectWriterProviderConcurrentTest {
                 assertTrue(fallback.isLockFreeFallback());
                 fallbackEntered.countDown();
                 await(releaseFallback);
+                fallback.throwIfFailed();
             } catch (Throwable error) {
                 fallbackError.set(error);
             } finally {
@@ -179,8 +184,10 @@ public class ObjectWriterProviderConcurrentTest {
         CountDownLatch retryDone = new CountDownLatch(1);
         try {
             assertTrue(fallbackEntered.await(5, TimeUnit.SECONDS));
+            assertSame(retainedLock, provider.createLocks.get(FailureBean.class));
             failFirst.countDown();
             assertTrue(firstDone.await(5, TimeUnit.SECONDS));
+            assertSame(retainedLock, provider.createLocks.get(FailureBean.class));
 
             startDaemonThread(() -> {
                 try {
@@ -192,6 +199,10 @@ public class ObjectWriterProviderConcurrentTest {
                 }
             });
             assertTrue(retryDone.await(5, TimeUnit.SECONDS));
+            assertNull(retryError.get());
+            assertNotNull(retryWriter.get());
+            assertSame(retainedLock, provider.createLocks.get(FailureBean.class));
+            assertSame(retryWriter.get(), provider.unregister(FailureBean.class));
         } finally {
             failFirst.countDown();
             releaseFallback.countDown();
@@ -200,9 +211,45 @@ public class ObjectWriterProviderConcurrentTest {
         assertTrue(fallbackDone.await(5, TimeUnit.SECONDS));
         assertSame(expectedError, firstError.get());
         assertNull(fallbackError.get());
-        assertNull(retryError.get());
-        assertNotNull(retryWriter.get());
         assertEquals(2, createCount.get());
+        assertNoCreateLocks(provider);
+    }
+
+    @Test
+    public void testFallbackRechecksCacheBeforeCreating() throws InterruptedException {
+        AtomicInteger createCount = new AtomicInteger();
+        ObjectWriterCreator creator = new ObjectWriterCreator() {
+            @Override
+            public ObjectWriter createObjectWriter(
+                    Class objectClass,
+                    long features,
+                    ObjectWriterProvider provider
+            ) {
+                if (objectClass == Bean.class) {
+                    createCount.incrementAndGet();
+                }
+                return super.createObjectWriter(objectClass, features, provider);
+            }
+        };
+        ObjectWriterProvider provider = new ObjectWriterProvider(creator);
+        CodecCreationCoordinator.Scope owner = CodecCreationCoordinator.acquire(provider.createLocks, Bean.class);
+        ObjectWriter canonical = ObjectWriterImplString.INSTANCE;
+        AtomicReference<ObjectWriter> result = new AtomicReference<>();
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        CountDownLatch done = new CountDownLatch(1);
+        Thread waiter = startDaemonThread(() -> getObjectWriter(provider, Bean.class, result, error, done));
+
+        try {
+            awaitWaiting(waiter);
+            provider.register(Bean.class, canonical);
+            assertTrue(done.await(10, TimeUnit.SECONDS));
+        } finally {
+            owner.close();
+        }
+
+        assertNull(error.get());
+        assertSame(canonical, result.get());
+        assertEquals(0, createCount.get());
         assertNoCreateLocks(provider);
     }
 
@@ -413,15 +460,22 @@ public class ObjectWriterProviderConcurrentTest {
         ObjectWriterProvider provider = new ObjectWriterProvider(creator);
         Type typeA = new TypeReference<GenericBean<ValueA>>() { }.getType();
         Type typeB = new TypeReference<GenericBean<ValueB>>() { }.getType();
+        AtomicReference<ObjectWriter> writerA = new AtomicReference<>();
+        AtomicReference<ObjectWriter> writerB = new AtomicReference<>();
         AtomicReference<Throwable> error = new AtomicReference<>();
         CountDownLatch done = new CountDownLatch(2);
 
-        startDaemonThread(() -> getObjectWriter(provider, typeA, error, done));
-        startDaemonThread(() -> getObjectWriter(provider, typeB, error, done));
+        startDaemonThread(() -> getObjectWriter(provider, typeA, writerA, error, done));
+        startDaemonThread(() -> getObjectWriter(provider, typeB, writerB, error, done));
 
         assertTrue(done.await(10, TimeUnit.SECONDS));
         assertNull(error.get());
         assertEquals(2, createCount.get());
+        assertNotNull(writerA.get());
+        assertNotNull(writerB.get());
+        assertNotSame(writerA.get(), writerB.get());
+        assertSame(writerA.get(), provider.cache.get(typeA));
+        assertSame(writerB.get(), provider.cache.get(typeB));
         assertNoCreateLocks(provider);
     }
 

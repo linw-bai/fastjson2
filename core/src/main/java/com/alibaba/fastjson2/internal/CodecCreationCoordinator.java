@@ -111,6 +111,15 @@ public final class CodecCreationCoordinator {
             }
         }
 
+        /**
+         * Records a successful cache observation or publication. A success
+         * supersedes any earlier creation failure retained by this entry.
+         */
+        public <T> T complete(T value) {
+            createLock.failure = null;
+            return value;
+        }
+
         @Override
         public void close() {
             if (closed) {

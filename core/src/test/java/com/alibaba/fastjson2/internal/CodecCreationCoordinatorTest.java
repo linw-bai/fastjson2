@@ -231,7 +231,7 @@ public class CodecCreationCoordinatorTest {
     }
 
     @Test
-    public void testFailureDoesNotLeakWhileFallbackRetainsLockEntry() throws InterruptedException {
+    public void testSuccessfulRetryClearsFailureWhileFallbackRetainsLockEntry() throws InterruptedException {
         long waitNanos = TimeUnit.MILLISECONDS.toNanos(10);
         ConcurrentMap<Type, CodecCreationCoordinator.LockEntry> locks = new ConcurrentHashMap<>();
         IllegalStateException expectedError = new IllegalStateException("first creation failed");
@@ -241,6 +241,8 @@ public class CodecCreationCoordinatorTest {
                 waitNanos,
                 0
         );
+        CodecCreationCoordinator.LockEntry retainedLock = locks.get(Bean.class);
+        assertNotNull(retainedLock);
         CountDownLatch fallbackEntered = new CountDownLatch(1);
         CountDownLatch releaseFallback = new CountDownLatch(1);
         CountDownLatch fallbackDone = new CountDownLatch(1);
@@ -256,6 +258,7 @@ public class CodecCreationCoordinatorTest {
                 assertTrue(fallback.isLockFreeFallback());
                 fallbackEntered.countDown();
                 await(releaseFallback);
+                fallback.throwIfFailed();
             } catch (Throwable error) {
                 fallbackError.set(error);
             } finally {
@@ -266,8 +269,10 @@ public class CodecCreationCoordinatorTest {
         AtomicInteger retryCreateCount = new AtomicInteger();
         try {
             assertTrue(fallbackEntered.await(5, TimeUnit.SECONDS));
+            assertSame(retainedLock, locks.get(Bean.class));
             owner.fail(expectedError);
             owner.close();
+            assertSame(retainedLock, locks.get(Bean.class));
 
             try (CodecCreationCoordinator.Scope retry = CodecCreationCoordinator.acquire(
                     locks,
@@ -277,7 +282,9 @@ public class CodecCreationCoordinatorTest {
             )) {
                 retry.throwIfFailed();
                 retryCreateCount.incrementAndGet();
+                assertTrue(retry.complete(Boolean.TRUE));
             }
+            assertSame(retainedLock, locks.get(Bean.class));
         } finally {
             owner.close();
             releaseFallback.countDown();

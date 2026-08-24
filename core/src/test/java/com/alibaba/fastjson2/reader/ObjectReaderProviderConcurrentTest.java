@@ -75,7 +75,7 @@ public class ObjectReaderProviderConcurrentTest {
         AtomicInteger createCount = new AtomicInteger();
         CountDownLatch firstStarted = new CountDownLatch(1);
         CountDownLatch failFirst = new CountDownLatch(1);
-        IllegalStateException expectedError = new IllegalStateException("first creation failed");
+        AssertionError expectedError = new AssertionError("first creation failed");
         ObjectReaderCreator creator = new ObjectReaderCreator() {
             @Override
             public <T> ObjectReader<T> createObjectReader(
@@ -156,6 +156,8 @@ public class ObjectReaderProviderConcurrentTest {
         AtomicReference<Throwable> firstError = new AtomicReference<>();
         startDaemonThread(() -> getObjectReader(provider, FailureBean.class, firstError, firstDone));
         assertTrue(firstStarted.await(5, TimeUnit.SECONDS));
+        CodecCreationCoordinator.LockEntry retainedLock = provider.createLocks.get(FailureBean.class);
+        assertNotNull(retainedLock);
 
         CountDownLatch fallbackEntered = new CountDownLatch(1);
         CountDownLatch releaseFallback = new CountDownLatch(1);
@@ -172,6 +174,7 @@ public class ObjectReaderProviderConcurrentTest {
                 assertTrue(fallback.isLockFreeFallback());
                 fallbackEntered.countDown();
                 await(releaseFallback);
+                fallback.throwIfFailed();
             } catch (Throwable error) {
                 fallbackError.set(error);
             } finally {
@@ -184,8 +187,10 @@ public class ObjectReaderProviderConcurrentTest {
         CountDownLatch retryDone = new CountDownLatch(1);
         try {
             assertTrue(fallbackEntered.await(5, TimeUnit.SECONDS));
+            assertSame(retainedLock, provider.createLocks.get(FailureBean.class));
             failFirst.countDown();
             assertTrue(firstDone.await(5, TimeUnit.SECONDS));
+            assertSame(retainedLock, provider.createLocks.get(FailureBean.class));
 
             startDaemonThread(() -> {
                 try {
@@ -197,6 +202,10 @@ public class ObjectReaderProviderConcurrentTest {
                 }
             });
             assertTrue(retryDone.await(5, TimeUnit.SECONDS));
+            assertNull(retryError.get());
+            assertNotNull(retryReader.get());
+            assertSame(retainedLock, provider.createLocks.get(FailureBean.class));
+            assertSame(retryReader.get(), provider.unregisterObjectReader(FailureBean.class));
         } finally {
             failFirst.countDown();
             releaseFallback.countDown();
@@ -205,9 +214,46 @@ public class ObjectReaderProviderConcurrentTest {
         assertTrue(fallbackDone.await(5, TimeUnit.SECONDS));
         assertSame(expectedError, firstError.get());
         assertNull(fallbackError.get());
-        assertNull(retryError.get());
-        assertNotNull(retryReader.get());
         assertEquals(2, createCount.get());
+        assertNoCreateLocks(provider);
+    }
+
+    @Test
+    public void testFallbackRechecksCacheBeforeCreating() throws InterruptedException {
+        AtomicInteger createCount = new AtomicInteger();
+        ObjectReaderCreator creator = new ObjectReaderCreator() {
+            @Override
+            public <T> ObjectReader<T> createObjectReader(
+                    Class<T> objectClass,
+                    Type objectType,
+                    boolean fieldBased,
+                    ObjectReaderProvider provider
+            ) {
+                if (objectClass == Bean.class) {
+                    createCount.incrementAndGet();
+                }
+                return super.createObjectReader(objectClass, objectType, fieldBased, provider);
+            }
+        };
+        ObjectReaderProvider provider = new ObjectReaderProvider(creator);
+        CodecCreationCoordinator.Scope owner = CodecCreationCoordinator.acquire(provider.createLocks, Bean.class);
+        ObjectReader canonical = ObjectReaderImplString.INSTANCE;
+        AtomicReference<ObjectReader> result = new AtomicReference<>();
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        CountDownLatch done = new CountDownLatch(1);
+        Thread waiter = startDaemonThread(() -> getObjectReader(provider, Bean.class, result, error, done));
+
+        try {
+            awaitWaiting(waiter);
+            provider.register(Bean.class, canonical);
+            assertTrue(done.await(10, TimeUnit.SECONDS));
+        } finally {
+            owner.close();
+        }
+
+        assertNull(error.get());
+        assertSame(canonical, result.get());
+        assertEquals(0, createCount.get());
         assertNoCreateLocks(provider);
     }
 
@@ -422,15 +468,22 @@ public class ObjectReaderProviderConcurrentTest {
         ObjectReaderProvider provider = new ObjectReaderProvider(creator);
         Type typeA = new TypeReference<GenericBean<ValueA>>() { }.getType();
         Type typeB = new TypeReference<GenericBean<ValueB>>() { }.getType();
+        AtomicReference<ObjectReader> readerA = new AtomicReference<>();
+        AtomicReference<ObjectReader> readerB = new AtomicReference<>();
         AtomicReference<Throwable> error = new AtomicReference<>();
         CountDownLatch done = new CountDownLatch(2);
 
-        startDaemonThread(() -> getObjectReader(provider, typeA, error, done));
-        startDaemonThread(() -> getObjectReader(provider, typeB, error, done));
+        startDaemonThread(() -> getObjectReader(provider, typeA, readerA, error, done));
+        startDaemonThread(() -> getObjectReader(provider, typeB, readerB, error, done));
 
         assertTrue(done.await(10, TimeUnit.SECONDS));
         assertNull(error.get());
         assertEquals(2, createCount.get());
+        assertNotNull(readerA.get());
+        assertNotNull(readerB.get());
+        assertNotSame(readerA.get(), readerB.get());
+        assertSame(readerA.get(), provider.cache.get(typeA));
+        assertSame(readerB.get(), provider.cache.get(typeB));
         assertNoCreateLocks(provider);
     }
 

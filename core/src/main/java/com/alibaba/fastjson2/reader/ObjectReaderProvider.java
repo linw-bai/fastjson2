@@ -1146,19 +1146,23 @@ public class ObjectReaderProvider
             if (scope.isLockFreeFallback()) {
                 ObjectReader objectReader = targetCache.get(objectType);
                 if (objectReader != null) {
-                    return objectReader;
+                    return scope.complete(objectReader);
                 }
                 objectReader = resolveObjectReader(objectType, fieldBased);
-                return CodecCreationCoordinator.publish(targetCache, objectType, objectReader);
+                return scope.complete(
+                        CodecCreationCoordinator.publish(targetCache, objectType, objectReader)
+                );
             }
             ObjectReader objectReader = targetCache.get(objectType);
             if (objectReader != null) {
-                return objectReader;
+                return scope.complete(objectReader);
             }
             scope.throwIfFailed();
             try {
                 objectReader = resolveObjectReader(objectType, fieldBased);
-                return CodecCreationCoordinator.publish(targetCache, objectType, objectReader);
+                return scope.complete(
+                        CodecCreationCoordinator.publish(targetCache, objectType, objectReader)
+                );
             } catch (RuntimeException | Error error) {
                 scope.fail(error);
                 throw error;
