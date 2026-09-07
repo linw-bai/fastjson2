@@ -1142,20 +1142,19 @@ public class ObjectReaderProvider
         ConcurrentMap<Type, ObjectReader> targetCache = fieldBased ? cacheFieldBased : cache;
         ConcurrentMap<Type, CodecCreationCoordinator.LockEntry> targetLocks =
                 fieldBased ? createLocksFieldBased : createLocks;
-        try (CodecCreationCoordinator.Scope scope = CodecCreationCoordinator.acquire(targetLocks, objectType)) {
+        try (CodecCreationCoordinator.Scope scope = CodecCreationCoordinator.acquire(targetLocks, objectType, targetCache)) {
+            ObjectReader objectReader = (ObjectReader) scope.getCachedValue();
+            if (objectReader == null) {
+                objectReader = targetCache.get(objectType);
+            }
+            if (objectReader != null) {
+                return scope.complete(objectReader);
+            }
             if (scope.isLockFreeFallback()) {
-                ObjectReader objectReader = targetCache.get(objectType);
-                if (objectReader != null) {
-                    return scope.complete(objectReader);
-                }
                 objectReader = resolveObjectReader(objectType, fieldBased);
                 return scope.complete(
                         CodecCreationCoordinator.publish(targetCache, objectType, objectReader)
                 );
-            }
-            ObjectReader objectReader = targetCache.get(objectType);
-            if (objectReader != null) {
-                return scope.complete(objectReader);
             }
             scope.throwIfFailed();
             try {

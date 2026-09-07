@@ -235,20 +235,26 @@ public class ObjectWriterProviderConcurrentTest {
         CodecCreationCoordinator.Scope owner = CodecCreationCoordinator.acquire(provider.createLocks, Bean.class);
         ObjectWriter canonical = ObjectWriterImplString.INSTANCE;
         AtomicReference<ObjectWriter> result = new AtomicReference<>();
+        AtomicReference<ObjectWriter> secondResult = new AtomicReference<>();
         AtomicReference<Throwable> error = new AtomicReference<>();
-        CountDownLatch done = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(2);
         Thread waiter = startDaemonThread(() -> getObjectWriter(provider, Bean.class, result, error, done));
+        Thread second = startDaemonThread(() -> getObjectWriter(provider, Bean.class, secondResult, error, done));
 
         try {
             awaitWaiting(waiter);
+            awaitWaiting(second);
             provider.register(Bean.class, canonical);
-            assertTrue(done.await(10, TimeUnit.SECONDS));
+            // Cache hits must not wait for the five-second creation fallback budget.
+            assertTrue(done.await(2, TimeUnit.SECONDS));
         } finally {
             owner.close();
+            assertTrue(done.await(5, TimeUnit.SECONDS));
         }
 
         assertNull(error.get());
         assertSame(canonical, result.get());
+        assertSame(canonical, secondResult.get());
         assertEquals(0, createCount.get());
         assertNoCreateLocks(provider);
     }

@@ -665,20 +665,19 @@ public class ObjectWriterProvider
         ConcurrentMap<Type, ObjectWriter> targetCache = fieldBased ? cacheFieldBased : cache;
         ConcurrentMap<Type, CodecCreationCoordinator.LockEntry> targetLocks =
                 fieldBased ? createLocksFieldBased : createLocks;
-        try (CodecCreationCoordinator.Scope scope = CodecCreationCoordinator.acquire(targetLocks, objectType)) {
+        try (CodecCreationCoordinator.Scope scope = CodecCreationCoordinator.acquire(targetLocks, objectType, targetCache)) {
+            ObjectWriter objectWriter = (ObjectWriter) scope.getCachedValue();
+            if (objectWriter == null) {
+                objectWriter = targetCache.get(objectType);
+            }
+            if (objectWriter != null) {
+                return scope.complete(objectWriter);
+            }
             if (scope.isLockFreeFallback()) {
-                ObjectWriter objectWriter = targetCache.get(objectType);
-                if (objectWriter != null) {
-                    return scope.complete(objectWriter);
-                }
                 objectWriter = resolveObjectWriter(objectType, objectClass, fieldBased);
                 return scope.complete(
                         CodecCreationCoordinator.publish(targetCache, objectType, objectWriter)
                 );
-            }
-            ObjectWriter objectWriter = targetCache.get(objectType);
-            if (objectWriter != null) {
-                return scope.complete(objectWriter);
             }
             scope.throwIfFailed();
             try {
